@@ -357,16 +357,6 @@ class Handles(commands.Cog):
             raise HandleCogError(f'The handle `{handle}` is already associated with another user.')
         cf_common.user_db.cache_cf_user(user)
 
-        if user.rank == cf.UNRATED_RANK:
-            role_to_assign = None
-        else:
-            roles = [role for role in ctx.guild.roles if role.name == user.rank.title]
-            if not roles:
-                raise HandleCogError(f'Role for rank `{user.rank.title}` not present in the server')
-            role_to_assign = roles[0]
-        await self.update_member_rank_role(member, role_to_assign,
-                                           reason='New handle set for user')
-
     @handle.command(brief='Identify yourself', usage='[handle]')
     @cf_common.user_guard(group='handle',
                           get_exception=lambda: HandleCogError('Identification is already running for you'))
@@ -434,8 +424,6 @@ class Handles(commands.Cog):
 
         cf_common.user_db.remove_handle(handle, ctx.guild.id)
         member = ctx.guild.get_member(user_id)
-        await self.update_member_rank_role(member, role_to_assign=None,
-                                           reason='Handle unlinked')
         embed = discord_common.embed_success(f'Removed {handle} from database')
         await ctx.send(embed=embed)
 
@@ -614,11 +602,6 @@ class Handles(commands.Cog):
             roles_str = ', '.join(f'`{role}`' for role in missing_roles)
             plural = 's' if len(missing_roles) > 1 else ''
             raise HandleCogError(f'Role{plural} for rank{plural} {roles_str} not present in the server')
-
-        for member, user in zip(members, users):
-            role_to_assign = None if user.rank == cf.UNRATED_RANK else rank2role[user.rank.title]
-            await self.update_member_rank_role(member, role_to_assign,
-                                               reason='Codeforces rank update')
 
     @staticmethod
     def _make_rankup_embeds(guild, contest, change_by_handle):

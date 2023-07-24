@@ -753,6 +753,109 @@ class Contests(commands.Cog):
         discord_common.set_author_footer(embed, ctx.author)
         await ctx.send(embed=embed, file=discord_file)
 
+    @commands.command(brief='Estimation of contest problem ratings', aliases=['probrat'], usage='contest_id')
+    async def problemratings(self, ctx, contest_id: int):
+        """Estimation of contest problem ratings
+        """
+        contests = await cf.contest.list()
+        reqcontest = [contest for contest in contests if contest.id == contest_id]
+        combined = [contest for contest in contests if reqcontest[0].startTimeSeconds == contest.startTimeSeconds]
+
+
+        # get ranklist of all contests in separate lists
+        # get rating_changes of all contests in separate lists
+        # for each problem name of original contest
+            # find in each ranklist the handles and ratings that had a chance to do the problem
+            # calculate rating from these values
+
+        problems = []
+        ranklists = []
+        rating_cache = dict()
+        for contest in combined:
+            _, problem, ranklist = await cf.contest.standings(contest_id=contest.id, show_unofficial=False)
+            problems.append(problem)
+            ranklists.append(ranklist)
+
+            if contest.id == contest_id:
+                officialRatings = [prob.rating for prob in problem]
+                indicies = [prob.index for prob in problem]
+                problemNames = [prob.name for prob in problem]
+
+            #build ratingCache that has all old_rating for all contestants
+            try:
+                rating_change = await cf.contest.ratingChanges(contest_id=contest.id)
+            except cf.RatingChangesUnavailableError as e:
+                rating_change = []
+            from_cache = False
+            if len(rating_change) == 0:
+                # get rating of contestants from cache
+                # we want to have the rating before the contest we query for
+                from_cache = True
+                cached_ratings = cf_common.cache2.rating_changes_cache.get_all_ratings_before_timestamp(reqcontest[0].startTimeSeconds)
+                for row in ranklist:
+                    member = row.party.members[0].handle
+                    # members not in cache are considered new (Unrated)
+                    if member in cached_ratings:
+                        rating_cache[member] = cached_ratings[member].newRating
+                    else:
+                        rating_cache[member] = 0
+            else:
+                for change in rating_change:
+                    rating_cache[change.handle] = change.oldRating
+
+        def calculateDifficulty(ratings, solved):
+            ans = -1000
+
+            def calcProb(dif):
+                prob = 1
+                d = 0
+                for (r, s) in zip(ratings, solved):
+                    p = 1/(1+10**((dif-r)/400))
+                    d += p
+                    if s:
+                        d -= 1
+                    prob *= p if s else (1-p)
+                return d > 0 and prob < 0.95
+            jump = 4096
+            while jump >= 1:
+                if calcProb(ans+jump):
+                    ans += jump
+                jump /= 2
+            ans = round(ans+1)
+            return ans
+
+        predicted = []
+        for name in problemNames:
+            ratings = []
+            solves = []
+
+            for i in range(len(problems)):
+                #get index of name in problem list of each contest
+                idx = -1
+                for j in range(len(problems[i])):
+                    if problems[i][j].name == name:
+                        idx = j
+                if idx == -1: continue
+                for row in ranklists[i]:
+                    member = row.party.members[0].handle
+                    if member in rating_cache:
+                        solves.append(min(row.problemResults[idx].points, 1))
+                        ratings.append(rating_cache[member])
+            predicted.append(calculateDifficulty(ratings,solves))
+
+        # Output results
+        style = table.Style('{:<}  {:>}  {:>}')
+        t = table.Table(style)
+        t += table.Header('#', 'Official', 'Predicted (C)' if from_cache else 'Predicted')
+        t += table.Line()
+        for i, index in enumerate(indicies):
+            t += table.Data(f'{index}', f'{officialRatings[i]}', f'{predicted[i]}')
+        table_str = f'```\n{t}\n```'
+        url = f'{cf.CONTEST_BASE_URL}{contest_id}'
+        title = reqcontest[0].name
+        embed = discord_common.cf_color_embed(description=table_str, title=title, url=url)
+        await ctx.send(embed=embed)
+
     @discord_common.send_error_if(ContestCogError, rl.RanklistError,
                                   cache_system2.CacheError, cf_common.ResolveHandleError)
     async def cog_command_error(self, ctx, error):

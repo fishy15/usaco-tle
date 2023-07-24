@@ -63,37 +63,56 @@ class Codeforces(commands.Cog):
     @commands.command(brief='Upsolve a problem')
     @cf_common.user_guard(group='gitgud')
     async def upsolve(self, ctx, choice: int = -1):
-        """Request an unsolved problem from a contest you participated in
-        delta  | -500 to -300 | -200 | -100 |  0  | +100 | +200 | +300 to +500
-        points |       2      |   3  |   5  |  8  |  12  |  17  |      23
+        """Upsolve: The command ;upsolve lists all problems that you haven't solved in contests you participated 
+        - Type ;upsolve for listing all available problems.
+        - Type ;upsolve <nr> for choosing the problem <nr> as gitgud problem (only possible if you have no active gitgud challenge)
+        - After solving the problem you can claim gitgud points for it with ;gotgud
+        - If you can't solve the problem for 2 hours you can skip it with ;nogud
+        - The all-time ranklist can be found with ;gitgudders
+        - A monthly ranklist is shown when you type ;monthlygitgudders
+        - Another way to gather gitgud points is ;gitgud (only works if you have no active gitgud-Challenge)
+        - For help with each of the commands you can type ;help <command> (e.g. ;help gitgudders)
+        
+        Point distribution:
+        delta  | <-300| -300 | -200 | -100 |  0  | +100 | +200 |>=300
+        points |   1  |   2  |   3  |   5  |  8  |  12  |  17  |  23 
         """
-        await self._validate_gitgud_status(ctx,delta=None)
         handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
         user = cf_common.user_db.fetch_cf_user(handle)
         rating = round(user.effective_rating, -2)
+        rating = max(1100, rating)
+        rating = min(3000, rating)
         resp = await cf.user.rating(handle=handle)
         contests = {change.contestId for change in resp}
         submissions = await cf.user.status(handle=handle)
         solved = {sub.problem.name for sub in submissions if sub.verdict == 'OK'}
         problems = [prob for prob in cf_common.cache2.problem_cache.problems
-                    if prob.name not in solved and prob.contestId in contests
-                    and abs(rating - prob.rating) <= 500]
+                    if prob.name not in solved and prob.contestId in contests]
 
         if not problems:
             raise CodeforcesCogError('Problems not found within the search parameters')
 
-        problems.sort(key=lambda problem: cf_common.cache2.contest_cache.get_contest(
-            problem.contestId).startTimeSeconds, reverse=True)
+        problems.sort(key=lambda problem: problem.rating)
 
         if choice > 0 and choice <= len(problems):
+            await self._validate_gitgud_status(ctx,delta=None)
             problem = problems[choice - 1]
             await self._gitgud(ctx, handle, problem, problem.rating - rating)
         else:
-            msg = '\n'.join(f'{i + 1}: [{prob.name}]({prob.url}) [{prob.rating}]'
-                            for i, prob in enumerate(problems[:5]))
-            title = f'Select a problem to upsolve (1-{len(problems)}):'
-            embed = discord_common.cf_color_embed(title=title, description=msg)
-            await ctx.send(embed=embed)
+            problems = problems[:500]
+              
+            def make_line(i, prob):
+                data = (f'{i + 1}: [{prob.name}]({prob.url}) [{prob.rating}]')
+                return data
+
+            def make_page(chunk, pi, num):
+                title = f'Select a problem to upsolve (1-{num}):'
+                msg = '\n'.join(make_line(10*pi+i, prob) for i, prob in enumerate(chunk))
+                embed = discord_common.cf_color_embed(description=msg)
+                return title, embed
+                  
+            pages = [make_page(chunk, pi, len(problems)) for pi, chunk in enumerate(paginator.chunkify(problems, 10))]
+            paginator.paginate(self.bot, ctx.channel, pages, wait_time=5 * 60, set_pagenum_footers=True)   
 
     @commands.command(brief='Recommend a problem',
                       usage='[+tag..] [~tag..] [rating]')

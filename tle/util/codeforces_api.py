@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import msgspec
 import time
 import functools
 from collections import namedtuple, deque, defaultdict
+from typing import List, Union
 
 import aiohttp
 
@@ -208,12 +210,15 @@ class RatingChangesUnavailableError(TrueApiError):
 # Codeforces API query methods
 
 _session = None
+_ratedListDecoder = None
 
 
 async def initialize():
     global _session
     _session = aiohttp.ClientSession()
 
+    global _ratedListDecoder
+    _ratedListDecoder = msgspec.json.Decoder(type=RatedListFormat)
 
 def _bool_to_str(value):
     if type(value) is bool:
@@ -269,6 +274,37 @@ async def _query_api(path, data=None):
                 raise CodeforcesApiError
             if resp.status == 200:
                 return respjson['result']
+            comment = f'HTTP Error {resp.status}, {respjson.get("comment")}'
+    except aiohttp.ClientError as e:
+        logger.error(f'Request to CF API encountered error: {e!r}')
+        raise ClientError from e
+    logger.warning(f'Query to CF API failed: {comment}')
+    if 'limit exceeded' in comment:
+        raise CallLimitExceededError(comment)
+    raise TrueApiError(comment)
+
+@cf_ratelimit
+async def _query_api_msgspec(path, decoder, data=None):
+    url = API_BASE_URL + path
+    try:
+        logger.info(f'Querying CF API at {url} with {data}')
+        # Explicitly state encoding (though aiohttp accepts gzip by default)
+        headers = {'Accept-Encoding': 'gzip'}
+        async with _session.post(url, data=data, headers=headers) as resp:
+            try:
+                respjson = decoder.decode(await resp.read())
+            except msgspec.DecodeError:
+                logger.warning(f'CF API did not respond with matching format, status {resp.status}.')
+                raise CodeforcesApiError
+            if resp.status == 200:
+                return respjson.result
+
+            # If an error, then output is likely small, so fine to default to old behavior
+            try:
+                respjson = await resp.json()
+            except aiohttp.ContentTypeError:
+                logger.warning(f'CF API did not respond with JSON, status {resp.status}.')
+                raise CodeforcesApiError
             comment = f'HTTP Error {resp.status}, {respjson.get("comment")}'
     except aiohttp.ClientError as e:
         logger.error(f'Request to CF API encountered error: {e!r}')
@@ -406,8 +442,8 @@ class user:
         params = {}
         if activeOnly is not None:
             params['activeOnly'] = _bool_to_str(activeOnly)
-        resp = await _query_api('user.ratedList', params)
-        return [make_from_dict(User, user_dict) for user_dict in resp]
+        resp = await _query_api_msgspec('user.ratedList', _ratedListDecoder, params)
+        return [userRepr.to_user() for userRepr in resp]
 
     @staticmethod
     async def status(*, handle, from_=None, count=None):
@@ -484,3 +520,32 @@ async def resolve_redirects(handles):
     handles_to_fix = await _needs_fixing(handles)
     handle_mapping = await _resolve_handle_mapping(handles_to_fix)
     return handle_mapping
+
+# Decoding msgspec structs
+
+class UserRepr(msgspec.Struct):
+    handle: str
+    contribution: int
+    rating: int
+    maxRating: int
+    lastOnlineTimeSeconds: int
+    registrationTimeSeconds: int
+    friendOfCount: int
+    titlePhoto: str
+    firstName: Union[str, msgspec.UnsetType] = msgspec.UNSET
+    lastName: Union[str, msgspec.UnsetType] = msgspec.UNSET
+    country: Union[str, msgspec.UnsetType] = msgspec.UNSET
+    city: Union[str, msgspec.UnsetType] = msgspec.UNSET
+    organization: Union[str, msgspec.UnsetType] = msgspec.UNSET
+
+    def _to_dict(self):
+        def unset_to_none(field):
+            return None if field == msgspec.UNSET else field
+        return {f: unset_to_none(getattr(self, f)) for f in self.__struct_fields__}
+
+    def to_user(self):
+        return make_from_dict(User, self._to_dict())
+
+class RatedListFormat(msgspec.Struct):
+    status: str
+    result: List[UserRepr]
